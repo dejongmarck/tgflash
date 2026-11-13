@@ -58,9 +58,9 @@ def pick(item, *keys, default=""):
         if value is not None: return value
     return default
 def product_label(p):
-    return str(pick(p, "name", "title", "symbol", "id", default="Product"))
+    return str(pick(p, "shortName", "name", "title", "symbol", "id", default="Product"))
 def product_id(p):
-    return str(pick(p, "id", "product_id", "product"))
+    return str(pick(p, "productKey", "slug", "id", "product_id", "product", default=""))
 def networks(p):
     value = pick(p, "networks", "delivery_networks", "network", default=[])
     if isinstance(value, str): return [value]
