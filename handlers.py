@@ -230,6 +230,8 @@ async def menu(message: Message, state: FSMContext):
             buttons = []
 
             for p in products[:50]:
+                if isinstance(p, dict) and p.get("isUnavailable") is True:
+                    continue
                 pid = product_id(p)
                 if not pid:
                     continue
