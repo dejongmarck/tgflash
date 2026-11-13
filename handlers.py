@@ -29,7 +29,7 @@ wallet = State()
 confirm = State()
 
 def lang_of(user):
-return user.language if user else “en”
+return user.language if user else "en"
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
