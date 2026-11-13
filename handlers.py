@@ -16,410 +16,413 @@ from services.flashtoken import FlashToken, unwrap, product_label, product_id, n
 from config import settings
 
 router = Router()
-log = logging.getLogger(name)
+log = logging.getLogger(__name__)
 
 api = FlashToken()
 PRODUCT_CACHE = {}
 
+
 class Purchase(StatesGroup):
-product = State()
-network = State()
-amount = State()
-wallet = State()
-confirm = State()
+    product = State()
+    network = State()
+    amount = State()
+    wallet = State()
+    confirm = State()
+
 
 def lang_of(user):
-return user.language if user else "en"
+    return user.language if user else "en"
+
+
+# START
 
 @router.message(CommandStart())
 async def start(message: Message, state: FSMContext):
-await state.clear()
-
-arg = (message.text or "").split(maxsplit=1)
-ref = None
-if len(arg) > 1 and arg[1].startswith("ref_"):
-    try:
-        ref = int(arg[1][4:])
-    except ValueError:
-        pass
-lang = (message.from_user.language_code or "en")[:2]
-if lang not in ("en", "nl", "fr", "de"):
-    lang = "en"
-user = await save_user(message.from_user.id, lang, ref)
-await message.answer(
-    t(user.language, "welcome"),
-    reply_markup=main_menu(user.language)
-)
-
-@router.message(Command(“admin”))
-async def admin(message: Message):
-
-if message.from_user.id not in settings.admin_ids:
-    return await message.answer("Not authorized.")
-async with Session() as s:
-    users = await s.scalar(select(func.count()).select_from(User))
-    orders = await s.scalar(select(func.count()).select_from(Order))
-    complete = await s.scalar(
-        select(func.count()).select_from(Order).where(Order.status == "completed")
-    )
-await message.answer(
-    f"<b>Admin overview</b>\n"
-    f"Users: {users}\n"
-    f"Orders: {orders}\n"
-    f"Completed: {complete}\n"
-    f"Markup setting: {settings.markup_percent}%"
-)
-
-@router.message(F.text)
-async def menu(message: Message, state: FSMContext):
-
-user = await get_user(message.from_user.id)
-if not user:
-    user = await save_user(message.from_user.id, "en")
-lang = lang_of(user)
-text = (message.text or "").strip()
-# LANGUAGE
-if text in (t(lang, "language"), "/language"):
-    return await message.answer(
-        t(lang, "choose_language"),
-        reply_markup=language_kb()
-    )
-# HELP
-if text == t(lang, "help"):
-    return await message.answer(t(lang, "help_text"))
-# ACCOUNT
-if text == t(lang, "account"):
-    try:
-        data = await api.account()
-        return await message.answer(
-            "<b>FlashToken reseller account</b>\n"
-            "<pre>" + str(data)[:3500] + "</pre>"
-        )
-    except Exception:
-        log.exception("Account error")
-        return await message.answer(t(lang, "account_unavailable"))
-# ORDERS
-if text == t(lang, "orders"):
-    orders = await list_orders(message.from_user.id)
-    if not orders:
-        return await message.answer(t(lang, "orders_empty"))
-    lines = [
-        f"#{o.provider_order_id} · {o.product_name} · {o.amount:g} · {o.status}"
-        for o in orders
-    ]
-    return await message.answer(
-        "<b>Your recent orders</b>\n" + "\n".join(lines)
-    )
-# SHOP / PRODUCTS
-if text in (
-    t(lang, "shop"),
-    "Producten",
-    "Products",
-    "Shop",
-    "Produits",
-    "Produkte"
-):
     await state.clear()
-    wait = await message.answer("🔄 Loading available products...")
-    try:
-        data = await api.products()
-        log.info("FlashToken products response: %s", str(data)[:5000])
-        products = unwrap(data)
-        if not products:
-            await wait.edit_text(
-                "⚠️ No products found in FlashToken.\n\n"
-                "Please check your FlashToken API catalogue."
-            )
-            return
-        PRODUCT_CACHE.clear()
-        buttons = []
-        for p in products[:50]:
-            pid = product_id(p)
-            if not pid:
-                continue
-            PRODUCT_CACHE[str(pid)] = p
-            label = product_label(p)
-            buttons.append([
-                InlineKeyboardButton(
-                    text=f"📦 {label[:55]}",
-                    callback_data=f"prod:{pid}"
-                )
-            ])
-        if not buttons:
-            await wait.edit_text(
-                "⚠️ Products were received, but no valid product IDs were found."
-            )
-            return
-        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
-        await wait.edit_text(
-            f"🛍 <b>Available Products</b>\n\n"
-            f"Choose a product below:\n\n"
-            f"Total products: {len(buttons)}",
-            reply_markup=keyboard
+
+    arg = (message.text or "").split(maxsplit=1)
+    ref = None
+    if len(arg) > 1 and arg[1].startswith("ref_"):
+        try:
+            ref = int(arg[1][4:])
+        except ValueError:
+            pass
+
+    lang = (message.from_user.language_code or "en")[:2]
+    if lang not in ("en", "nl", "fr", "de"):
+        lang = "en"
+
+    user = await save_user(message.from_user.id, lang, ref)
+    await message.answer(
+        t(user.language, "welcome"),
+        reply_markup=main_menu(user.language)
+    )
+
+
+# ADMIN
+
+@router.message(Command("admin"))
+async def admin(message: Message):
+    if message.from_user.id not in settings.admin_ids:
+        return await message.answer("Not authorized.")
+
+    async with Session() as s:
+        users = await s.scalar(select(func.count()).select_from(User))
+        orders = await s.scalar(select(func.count()).select_from(Order))
+        complete = await s.scalar(
+            select(func.count()).select_from(Order).where(Order.status == "completed")
         )
-        return
-    except Exception as e:
-        log.exception("Catalog error")
-        await wait.edit_text(
-            "❌ Could not load FlashToken products.\n\n"
-            f"Error: <code>{str(e)[:1000]}</code>"
-        )
-        return
 
-LANGUAGE CALLBACK
-
-@router.callback_query(F.data.startswith(“lang:”))
-async def language_callback(call: CallbackQuery):
-
-lang = call.data.split(":")[1]
-await set_language(call.from_user.id, lang)
-await call.message.answer(
-    t(lang, "welcome"),
-    reply_markup=main_menu(lang)
-)
-await call.answer()
-
-PRODUCT CALLBACK
-
-@router.callback_query(F.data.startswith(“prod:”))
-async def product_callback(call: CallbackQuery, state: FSMContext):
-
-pid = call.data.split(":", 1)[1]
-p = PRODUCT_CACHE.get(pid)
-if not p:
-    await call.answer(
-        "Catalogue expired. Open Shop again.",
-        show_alert=True
+    await message.answer(
+        f"<b>Admin overview</b>\n"
+        f"Users: {users}\n"
+        f"Orders: {orders}\n"
+        f"Completed: {complete}\n"
+        f"Markup setting: {settings.markup_percent}%"
     )
-    return
-ns = networks(p)
-if not ns:
-    fallback = pick(
-        p,
-        "delivery_network",
-        "network",
-        default=""
-    )
-    if fallback:
-        ns = [str(fallback)]
-if not ns:
-    await call.answer(
-        "No delivery networks available for this product.",
-        show_alert=True
-    )
-    return
-await state.update_data(
-    product_id=pid,
-    product_name=product_label(p),
-    product_data=p
-)
-await state.set_state(Purchase.network)
-kb = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=n[:60],
-                callback_data=f"net:{n}"
-            )
-        ]
-        for n in ns[:30]
-    ]
-)
-user = await get_user(call.from_user.id)
-await call.message.answer(
-    t(lang_of(user), "choose_network"),
-    reply_markup=kb
-)
-await call.answer()
 
-NETWORK CALLBACK
 
-@router.callback_query(F.data.startswith(“net:”))
-async def network_callback(call: CallbackQuery, state: FSMContext):
-
-net = call.data.split(":", 1)[1]
-await state.update_data(network=net)
-await state.set_state(Purchase.amount)
-user = await get_user(call.from_user.id)
-await call.message.answer(
-    t(lang_of(user), "enter_amount")
-)
-await call.answer()
-
-AMOUNT
+# AMOUNT
+# (staat vóór de algemene F.text-handler, anders vangt die de invoer af)
 
 @router.message(Purchase.amount)
 async def amount_message(message: Message, state: FSMContext):
+    try:
+        amount = float((message.text or "").replace(",", "."))
+        if amount <= 0 or amount > 1000000:
+            raise ValueError()
+    except Exception:
+        return await message.answer("Please enter a valid positive number.")
 
-try:
-    amount = float(message.text.replace(",", "."))
-    if amount <= 0 or amount > 1000000:
-        raise ValueError()
-except Exception:
-    return await message.answer(
-        "Please enter a valid positive number."
-    )
-await state.update_data(amount=amount)
-await state.set_state(Purchase.wallet)
-user = await get_user(message.from_user.id)
-await message.answer(
-    t(lang_of(user), "enter_wallet")
-)
+    await state.update_data(amount=amount)
+    await state.set_state(Purchase.wallet)
 
-WALLET
+    user = await get_user(message.from_user.id)
+    await message.answer(t(lang_of(user), "enter_wallet"))
+
+
+# WALLET
 
 @router.message(Purchase.wallet)
 async def wallet_message(message: Message, state: FSMContext):
-
-wallet = (message.text or "").strip()
-if (
-    len(wallet) < 20
-    or len(wallet) > 160
-    or any(c.isspace() for c in wallet)
-):
-    return await message.answer(
-        "That wallet address does not look valid. Please check it."
-    )
-await state.update_data(wallet=wallet)
-data = await state.get_data()
-user = await get_user(message.from_user.id)
-lang = lang_of(user)
-p = data.get("product_data", {})
-price = pick(
-    p,
-    "price",
-    "unit_price",
-    "cost",
-    default=None
-)
-quote = "not available"
-try:
-    if price is not None:
-        quote = (
-            f"{float(price) * float(data['amount']) * (1 + settings.markup_percent / 100):.6g}"
+    wallet = (message.text or "").strip()
+    if (
+        len(wallet) < 20
+        or len(wallet) > 160
+        or any(c.isspace() for c in wallet)
+    ):
+        return await message.answer(
+            "That wallet address does not look valid. Please check it."
         )
-except Exception:
-    pass
-await state.set_state(Purchase.confirm)
-text = (
-    f"<b>{t(lang, 'confirm')}</b>\n\n"
-    f"Product: {data['product_name']}\n"
-    f"Network: {data['network']}\n"
-    f"Amount: {data['amount']:g}\n"
-    f"Wallet: <code>{wallet}</code>\n\n"
-    + t(lang, "markup_note", pct=settings.markup_percent, quote=quote)
-    + "\n\nFlashToken creates and prices the actual checkout."
-)
-kb = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text=t(lang, "buy"),
-                callback_data="order:create"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text=t(lang, "cancel"),
-                callback_data="order:cancel"
-            )
-        ]
-    ]
-)
-await message.answer(
-    text,
-    reply_markup=kb
-)
 
-CANCEL ORDER
-
-@router.callback_query(F.data == “order:cancel”)
-async def cancel_order(call: CallbackQuery, state: FSMContext):
-
-await state.clear()
-await call.message.answer("Order cancelled.")
-await call.answer()
-
-CREATE ORDER
-
-@router.callback_query(F.data == “order:create”)
-async def create_order(call: CallbackQuery, state: FSMContext):
-
-data = await state.get_data()
-if not data.get("product_id"):
-    await call.answer(
-        "Order session expired. Start again.",
-        show_alert=True
-    )
-    return
-try:
-    result = await api.create_order(
-        data["product_id"],
-        data["network"],
-        data["amount"],
-        data["wallet"],
-        f"tg-{call.from_user.id}-{uuid.uuid4().hex}"
-    )
-    provider_id = str(
-        pick(result, "id", "order_id", default="")
-    )
-    pay_url = str(
-        pick(
-            result,
-            "payment_url",
-            "payment_link",
-            "checkout_url",
-            "url",
-            default=""
-        )
-    )
-    if not provider_id or not pay_url:
-        log.error(
-            "Unexpected create-order response: %s",
-            result
-        )
-        await call.message.answer(
-            "FlashToken returned an unexpected response. Contact support."
-        )
-        return
-    await add_order(
-        telegram_user_id=call.from_user.id,
-        provider_order_id=provider_id,
-        product_id=data["product_id"],
-        product_name=data["product_name"],
-        network=data["network"],
-        amount=data["amount"],
-        status=str(result.get("status", "waiting")),
-        payment_status=str(result.get("payment_status", "waiting")),
-        payment_url=pay_url
-    )
-    user = await get_user(call.from_user.id)
+    await state.update_data(wallet=wallet)
+    data = await state.get_data()
+    user = await get_user(message.from_user.id)
     lang = lang_of(user)
+
+    p = data.get("product_data", {})
+    price = pick(p, "price", "unit_price", "cost", default=None)
+
+    quote = "not available"
+    try:
+        if price is not None:
+            quote = (
+                f"{float(price) * float(data['amount']) * (1 + settings.markup_percent / 100):.6g}"
+            )
+    except Exception:
+        pass
+
+    await state.set_state(Purchase.confirm)
+
+    text = (
+        f"<b>{t(lang, 'confirm')}</b>\n\n"
+        f"Product: {data['product_name']}\n"
+        f"Network: {data['network']}\n"
+        f"Amount: {data['amount']:g}\n"
+        f"Wallet: <code>{wallet}</code>\n\n"
+        + t(lang, "markup_note", pct=settings.markup_percent, quote=quote)
+        + "\n\nFlashToken creates and prices the actual checkout."
+    )
+
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💳 Open official FlashToken checkout",
-                    url=pay_url
-                )
-            ]
+            [InlineKeyboardButton(text=t(lang, "buy"), callback_data="order:create")],
+            [InlineKeyboardButton(text=t(lang, "cancel"), callback_data="order:cancel")],
         ]
     )
+
+    await message.answer(text, reply_markup=kb)
+
+
+# MENU (algemene teksthandler — moet als laatste message-handler staan)
+
+@router.message(F.text)
+async def menu(message: Message, state: FSMContext):
+    user = await get_user(message.from_user.id)
+    if not user:
+        user = await save_user(message.from_user.id, "en")
+
+    lang = lang_of(user)
+    text = (message.text or "").strip()
+
+    # LANGUAGE
+    if text in (t(lang, "language"), "/language"):
+        return await message.answer(
+            t(lang, "choose_language"),
+            reply_markup=language_kb()
+        )
+
+    # HELP
+    if text == t(lang, "help"):
+        return await message.answer(t(lang, "help_text"))
+
+    # ACCOUNT
+    if text == t(lang, "account"):
+        try:
+            data = await api.account()
+            return await message.answer(
+                "<b>FlashToken reseller account</b>\n"
+                "<pre>" + str(data)[:3500] + "</pre>"
+            )
+        except Exception:
+            log.exception("Account error")
+            return await message.answer(t(lang, "account_unavailable"))
+
+    # ORDERS
+    if text == t(lang, "orders"):
+        orders = await list_orders(message.from_user.id)
+        if not orders:
+            return await message.answer(t(lang, "orders_empty"))
+
+        lines = [
+            f"#{o.provider_order_id} · {o.product_name} · {o.amount:g} · {o.status}"
+            for o in orders
+        ]
+        return await message.answer(
+            "<b>Your recent orders</b>\n" + "\n".join(lines)
+        )
+
+    # SHOP / PRODUCTS
+    if text in (
+        t(lang, "shop"),
+        "Producten",
+        "Products",
+        "Shop",
+        "Produits",
+        "Produkte",
+    ):
+        await state.clear()
+        wait = await message.answer("🔄 Loading available products...")
+
+        try:
+            data = await api.products()
+            log.info("FlashToken products response: %s", str(data)[:5000])
+            products = unwrap(data)
+
+            if not products:
+                await wait.edit_text(
+                    "⚠️ No products found in FlashToken.\n\n"
+                    "Please check your FlashToken API catalogue."
+                )
+                return
+
+            PRODUCT_CACHE.clear()
+            buttons = []
+
+            for p in products[:50]:
+                pid = product_id(p)
+                if not pid:
+                    continue
+                PRODUCT_CACHE[str(pid)] = p
+                label = product_label(p)
+                buttons.append([
+                    InlineKeyboardButton(
+                        text=f"📦 {label[:55]}",
+                        callback_data=f"prod:{pid}"
+                    )
+                ])
+
+            if not buttons:
+                await wait.edit_text(
+                    "⚠️ Products were received, but no valid product IDs were found."
+                )
+                return
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+            await wait.edit_text(
+                f"🛍 <b>Available Products</b>\n\n"
+                f"Choose a product below:\n\n"
+                f"Total products: {len(buttons)}",
+                reply_markup=keyboard
+            )
+            return
+
+        except Exception as e:
+            log.exception("Catalog error")
+            await wait.edit_text(
+                "❌ Could not load FlashToken products.\n\n"
+                f"Error: <code>{str(e)[:1000]}</code>"
+            )
+            return
+
+
+# LANGUAGE CALLBACK
+
+@router.callback_query(F.data.startswith("lang:"))
+async def language_callback(call: CallbackQuery):
+    lang = call.data.split(":")[1]
+    await set_language(call.from_user.id, lang)
     await call.message.answer(
-        t(
-            lang,
-            "created",
-            id=provider_id,
-            status=result.get("status", "waiting"),
-            url=pay_url
-        ),
+        t(lang, "welcome"),
+        reply_markup=main_menu(lang)
+    )
+    await call.answer()
+
+
+# PRODUCT CALLBACK
+
+@router.callback_query(F.data.startswith("prod:"))
+async def product_callback(call: CallbackQuery, state: FSMContext):
+    pid = call.data.split(":", 1)[1]
+    p = PRODUCT_CACHE.get(pid)
+
+    if not p:
+        await call.answer("Catalogue expired. Open Shop again.", show_alert=True)
+        return
+
+    ns = networks(p)
+    if not ns:
+        fallback = pick(p, "delivery_network", "network", default="")
+        if fallback:
+            ns = [str(fallback)]
+
+    if not ns:
+        await call.answer(
+            "No delivery networks available for this product.",
+            show_alert=True
+        )
+        return
+
+    await state.update_data(
+        product_id=pid,
+        product_name=product_label(p),
+        product_data=p
+    )
+    await state.set_state(Purchase.network)
+
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=n[:60], callback_data=f"net:{n}")]
+            for n in ns[:30]
+        ]
+    )
+
+    user = await get_user(call.from_user.id)
+    await call.message.answer(
+        t(lang_of(user), "choose_network"),
         reply_markup=kb
     )
-except Exception:
-    log.exception("Order creation failed")
-    await call.message.answer(
-        "Could not create the order with FlashToken. Please try again later."
-    )
-finally:
-    await state.clear()
     await call.answer()
+
+
+# NETWORK CALLBACK
+
+@router.callback_query(F.data.startswith("net:"))
+async def network_callback(call: CallbackQuery, state: FSMContext):
+    net = call.data.split(":", 1)[1]
+    await state.update_data(network=net)
+    await state.set_state(Purchase.amount)
+
+    user = await get_user(call.from_user.id)
+    await call.message.answer(t(lang_of(user), "enter_amount"))
+    await call.answer()
+
+
+# CANCEL ORDER
+
+@router.callback_query(F.data == "order:cancel")
+async def cancel_order(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.answer("Order cancelled.")
+    await call.answer()
+
+
+# CREATE ORDER
+
+@router.callback_query(F.data == "order:create")
+async def create_order(call: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+
+    if not data.get("product_id"):
+        await call.answer("Order session expired. Start again.", show_alert=True)
+        return
+
+    try:
+        result = await api.create_order(
+            data["product_id"],
+            data["network"],
+            data["amount"],
+            data["wallet"],
+            f"tg-{call.from_user.id}-{uuid.uuid4().hex}"
+        )
+
+        provider_id = str(pick(result, "id", "order_id", default=""))
+        pay_url = str(
+            pick(
+                result,
+                "payment_url",
+                "payment_link",
+                "checkout_url",
+                "url",
+                default=""
+            )
+        )
+
+        if not provider_id or not pay_url:
+            log.error("Unexpected create-order response: %s", result)
+            await call.message.answer(
+                "FlashToken returned an unexpected response. Contact support."
+            )
+            return
+
+        await add_order(
+            telegram_user_id=call.from_user.id,
+            provider_order_id=provider_id,
+            product_id=data["product_id"],
+            product_name=data["product_name"],
+            network=data["network"],
+            amount=data["amount"],
+            status=str(result.get("status", "waiting")),
+            payment_status=str(result.get("payment_status", "waiting")),
+            payment_url=pay_url
+        )
+
+        user = await get_user(call.from_user.id)
+        lang = lang_of(user)
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="💳 Open official FlashToken checkout", url=pay_url)]
+            ]
+        )
+
+        await call.message.answer(
+            t(
+                lang,
+                "created",
+                id=provider_id,
+                status=result.get("status", "waiting"),
+                url=pay_url
+            ),
+            reply_markup=kb
+        )
+
+    except Exception:
+        log.exception("Order creation failed")
+        await call.message.answer(
+            "Could not create the order with FlashToken. Please try again later."
+        )
+
+    finally:
+        await state.clear()
+        await call.answer()
